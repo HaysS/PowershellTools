@@ -1,45 +1,184 @@
 # example script to upload a survey file to HUNT (2.10+)
+# Script to upload manual .bz2 file to hunt server.
+Param(
+	[Parameter(	Position = 0,
+				Mandatory = $true)]
+	[String]
+	$Path, # <folder containing the survey results (.bz2) files to upload>
 
-$url = "https://localhost"
+	[String]
+	$TargetGroup = "OfflineScans",
+
+	[String]
+	$HuntServer = "https://localhost:443",
+
+	[PSCredential]
+	[System.Management.Automation.Credential()]
+	$Credential = [System.Management.Automation.PSCredential]::Empty,
+)
+
+# INITIALIZE
+Write-Host "PSVersion Check: $($PSVersionTable.PSVersion.tostring())"
+
+# Hardcoded Credentials (unsafe in production but convenient for testing)
+# Infocyte Credentials
+# If a user did not add their credentials, use the default ones.
+if ($Credential -eq [System.Management.Automation.PSCredential]::Empty) {
+	$username = 'infocyte'
+	$password = 'hunt' | ConvertTo-SecureString -asPlainText -Force
+	$Script:Credential = New-Object System.Management.Automation.PSCredential($username,$password)
+}
+
+# VARIABLES
 $survey = "HostSurvey.json.bz2"
-$targetId = $null
-$scanId = $null
-$scanName = $null
-$targetName = "offline"
-$user = "infocyte"
-$password = "hunt"
+$surveyext = ".json.bz2"
+$api = "$HuntServer/api"
 
-#ignore certificate root errors from self signed certs
-[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
 
-$api = "$url/api"
-$surveyPath = "$PSScriptRoot\$survey"
+# FUNCTIONS
+#Get Login Token (required)
+function New-ICToken ([PSCredential]$Credential, [String]$HuntServer = "https://localhost:443" ) {
+	Write-Verbose "Requesting new Token from $HuntServer using account $($Credential.username)"
+	Write-Verbose "Credentials and Hunt Server Address are stored in global variables for use in all IC cmdlets"
+	if (-NOT ([System.Net.ServicePointManager]::ServerCertificateValidationCallback)) {
+		#Accept Unsigned CERTS
+		[System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
+	}
+	if (-NOT $Credential) {
+		# Default Credentials
+		$username = 'infocyte'
+		$password = 'pulse' | ConvertTo-SecureString -asPlainText -Force
+		$Credential = New-Object System.Management.Automation.PSCredential($username,$password)
+	}
 
+	$Global:HuntServerAddress = $HuntServer
+
+	$data = @{
+		username = $Credential.GetNetworkCredential().username
+		password = $Credential.GetNetworkCredential().password
+	}
+	$i = $data | ConvertTo-JSON
+	try {
+		$response = Invoke-RestMethod "$HuntServerAddress/api/users/login" -Method POST -Body $i -ContentType 'application/json'
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	if ($response -match "Error") {
+		Write-Warning "Error: Unauthorized"
+		return "ERROR: $($_.Exception.Message)"
+	} else {
+		# Set Token to global variable
+		$Global:ICToken = $response.id
+		Write-Verbose 'New token saved to global variable: $Global:ICToken'
+		$response
+	}
+}
+
+function New-ICTargetGroup ([String]$Name) {
+	Write-Verbose "Creating new target list: $Name"
+	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+	$headers.Add("Authorization", $Global:ICToken)
+	$body = '{"name":"'+$Name+'"}'
+	try {
+		$objects += Invoke-RestMethod ("$HuntServerAddress/api/targets") -Headers $headers -Body $body -Method POST -ContentType 'application/json'
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	$objects
+}
+
+function Get-ICTargetGroup {
+	Write-Verbose "Requesting TargetGroups from $HuntServerAddress"
+	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+	$headers.Add("Authorization", $Global:ICToken)
+	$headers.Add("filter", '{"order":["name","id"]}')
+	try {
+		$objects += Invoke-RestMethod ("$HuntServerAddress/api/targets") -Headers $headers -Method GET -ContentType 'application/json'
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	$objects
+}
+
+function New-ICScanId ([String]$ScanName, [String]$ScanId) {
+	Write-Verbose "Creating new scanId: $ScanId"
+	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+	$headers.Add("Authorization", $Global:ICToken)
+	$body = @{ name=$scanName; targetId=$targetId } | ConvertTo-Json
+	try {
+		$response = Invoke-RestMethod ("$HuntServerAddress/api/scans") -Headers $headers -Body $body -Method POST -ContentType "application/json"
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	return $response.id #ScanId
+}
+
+function Get-ICActiveTasks {
+	Write-Verbose "Getting Active Tasks from Infocyte HUNT: $HuntServerAddress"
+	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+	$headers.Add("Authorization", $Global:ICToken)
+	try {
+		$objects += Invoke-RestMethod ("$HuntServerAddress/api/usertasks/active") -Headers $headers -Method GET -ContentType 'application/json'
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	if ($objects) {
+		$objects | where { $_.status -eq "Active" }
+	} else {
+		return
+	}
+
+}
+
+function Upload-ICSurveys ([String]$File, [String]$ScanId){
+	Write-Verbose "Uploading Surveys"
+	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+	$headers.Add("Authorization", $Global:ICToken)
+	$headers.Add("scanid", $ScanId)
+	$body = '{"name":"'+$Name+'"}'
+	try {
+		$objects = Invoke-RestMethod ("$HuntServerAddress/api/survey") -Headers $headers -Body $body -Method POST -InFile $File -ContentType "application/octet-stream"
+	} catch {
+		Write-Warning "Error: $_"
+		return "ERROR: $($_.Exception.Message)"
+	}
+	$objects
+}
+
+
+# MAIN
 Write-Host "Acquiring token..."
-$login = @{ username=$user; password=$password } | ConvertTo-Json
-$response = Invoke-RestMethod -Uri "$api/users/login" -Method Post -Body $login -ContentType "application/json"
-$token = $response.id
+$Token = New-ICToken $Credential $HuntServer
 
-if ($targetId -eq $null) {
-	Write-Host "Creating target..."
-	$target = @{ name=$targetName } | ConvertTo-Json
-	$response = Invoke-RestMethod -Headers @{ Authorization = $token } -Uri "$api/targets" -Method Post -Body $target -ContentType "application/json"
-	$targetId = $response.id
+Write-Host "Checking for '$TargetGroup' target group..."
+$TargetGroups = Get-ICTargetGroup
+if ($TargetGroups.name -contains $TargetGroup) {
+	Write-Host "$TargetGroup Exists"
+	$TargetGroupObj = $targetGroups | where { $_.name -eq $TargetGroup}
+} else {
+		Write-Host "$TargetGroup does not exist. Creating new Target Group '$TargetGroup'"
+		New-ICTargetGroup $TargetGroup
 }
 
-if($scanName -eq $null) {
-	$scanName = (get-date).toString("yyyy-MM-dd HH:mm")
+if($ScanName -eq $null) {
+	$ScanName = (get-date).toString("yyyy-MM-dd HH:mm")
 }
 
-if ($scanId -eq $null) {
+if ($ScanId -eq $null) {
 	Write-Host "Creating scan..."
-	$scan = @{ name=$scanName; targetId=$targetId } | ConvertTo-Json
-	$response = Invoke-RestMethod -Headers @{ Authorization = $token } -Uri "$api/scans" -Method Post -Body $scan -ContentType "application/json"
-	$scanId = $response.id
+	$ScanId = New-ICScanId $ScanName $TargetId
 }
 
-Write-Host "Uploading survey..."
-Invoke-RestMethod -Headers @{ Authorization = $token; scanid = $scanId } -Uri "$api/survey" -Method Post -InFile $surveyPath -ContentType "application/octet-stream"
+Write-Host "Uploading surveys..."
+Get-ChildItem $Path -recurse -filter $surveyext | foreach {
+	Write-Host "Uploading $_"
+	Upload-ICSurveys $_ $ScanId
+}
 
 # TODO: detect when scan is no longer processing submissions, then mark as completed
 
