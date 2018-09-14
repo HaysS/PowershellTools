@@ -520,7 +520,7 @@ function Get-ICLastscanId {
 
 # Setup APIs
 function New-ICTargetGroup ([String]$Name) {
-	Write-Verbose "Creating new target list: $Name"
+	Write-Verbose "Creating new target group: $Name"
 	$headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
 	$headers.Add("Authorization", $Global:ICToken)
 	$body = '{"name":"'+$Name+'"}'
